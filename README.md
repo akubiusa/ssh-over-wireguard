@@ -130,6 +130,18 @@ A Japanese translation is available in [README-ja.md](README-ja.md).
 | `ssh-host-key` | SSH server host key for verification | Yes | - |
 | `ssh-port` | SSH port number | No | `22` |
 
+### Input Handling and Validation
+
+Inputs are passed to the generated scripts as data through environment variables, never as shell syntax, so quotes, `$(...)` and backticks in an input are not evaluated on the runner. The action fails early, before WireGuard is configured, when an input is invalid:
+
+- `operation` must be `ssh` or `scp`, and `scp-direction` must be `upload` or `download` when `operation=scp`.
+- `ssh-port` must be a number from 1 to 65535.
+- `ssh-hostname` and `ssh-user` may contain only letters, digits, `.`, `_` and `-`, and must start with a letter or digit (`ssh-user` may also start with `_`).
+- `ssh-host-ip` must be an IP address or host name (letters, digits, `.`, `:` and `-`).
+- `ssh-host-key` and the `wireguard-*` inputs must be a single line.
+
+The `command` input is sent to the remote shell as-is. It is **not** expanded on the runner, so `$VAR` and `$(...)` are evaluated on the remote server. To insert a workflow value, use a `${{ ... }}` expression in the workflow.
+
 ## Security Considerations
 
 ### Secrets Management

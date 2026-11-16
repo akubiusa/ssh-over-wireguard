@@ -101,16 +101,75 @@ runs:
   steps:
     - name: Validate inputs
       shell: bash
+      env:
+        OPERATION: ${{ inputs.operation }}
+        SCP_SOURCE: ${{ inputs.scp-source }}
+        SCP_DESTINATION: ${{ inputs.scp-destination }}
+        SCP_DIRECTION: ${{ inputs.scp-direction }}
+        WG_PRIVATE_KEY: ${{ inputs.wireguard-private-key }}
+        WG_ADDRESS: ${{ inputs.wireguard-address }}
+        WG_DNS: ${{ inputs.wireguard-dns }}
+        WG_PEER_PUBLIC_KEY: ${{ inputs.wireguard-peer-public-key }}
+        WG_PRESHARED_KEY: ${{ inputs.wireguard-preshared-key }}
+        WG_ENDPOINT: ${{ inputs.wireguard-endpoint }}
+        WG_ALLOWED_IPS: ${{ inputs.wireguard-allowed-ips }}
+        SSH_USER: ${{ inputs.ssh-user }}
+        SSH_HOSTNAME: ${{ inputs.ssh-hostname }}
+        SSH_HOST_IP: ${{ inputs.ssh-host-ip }}
+        SSH_HOST_KEY: ${{ inputs.ssh-host-key }}
+        SSH_PORT: ${{ inputs.ssh-port }}
       run: |
-        # Validate SCP operation inputs
-        if [ "${{ inputs.operation }}" = "scp" ]; then
-          if [ -z "${{ inputs.scp-source }}" ] || \
-             [ -z "${{ inputs.scp-destination }}" ]; then
+        # Inputs are only read through environment variables and are never
+        # echoed, because several of them are secrets.
+        fail() {
+          echo "Error: invalid input '$1': $2" >&2
+          exit 1
+        }
+
+        # Reject CR/LF so a value cannot add keys or sections to generated
+        # config files.
+        single_line() {
+          case "$2" in
+            *$'\n'* | *$'\r'*) fail "$1" "must be a single line" ;;
+          esac
+        }
+
+        case "$OPERATION" in
+          ssh | scp) ;;
+          *) fail operation "must be 'ssh' or 'scp'" ;;
+        esac
+
+        if [ "$OPERATION" = "scp" ]; then
+          if [ -z "$SCP_SOURCE" ] || [ -z "$SCP_DESTINATION" ]; then
             echo "Error: scp-source and scp-destination are required" \
-                 "when operation=scp"
+                 "when operation=scp" >&2
             exit 1
           fi
+          case "$SCP_DIRECTION" in
+            upload | download) ;;
+            *) fail scp-direction "must be 'upload' or 'download'" ;;
+          esac
         fi
+
+        if ! [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] \
+           || (( 10#$SSH_PORT < 1 || 10#$SSH_PORT > 65535 )); then
+          fail ssh-port "must be a number between 1 and 65535"
+        fi
+        [[ "$SSH_HOSTNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+          || fail ssh-hostname "must match [A-Za-z0-9][A-Za-z0-9._-]*"
+        [[ "$SSH_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] \
+          || fail ssh-user "must match [A-Za-z0-9_][A-Za-z0-9._-]*"
+        [[ "$SSH_HOST_IP" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] \
+          || fail ssh-host-ip "must be an IP address or host name"
+
+        single_line ssh-host-key "$SSH_HOST_KEY"
+        single_line wireguard-private-key "$WG_PRIVATE_KEY"
+        single_line wireguard-address "$WG_ADDRESS"
+        single_line wireguard-dns "$WG_DNS"
+        single_line wireguard-peer-public-key "$WG_PEER_PUBLIC_KEY"
+        single_line wireguard-preshared-key "$WG_PRESHARED_KEY"
+        single_line wireguard-endpoint "$WG_ENDPOINT"
+        single_line wireguard-allowed-ips "$WG_ALLOWED_IPS"
 
         echo "✅ Input validation passed"
 
@@ -134,36 +193,38 @@ runs:
         else
           echo "✅ Full WireGuard package installed successfully"
         fi
-
+        
     - name: Setup WireGuard configuration
       shell: bash
+      env:
+        WG_PRIVATE_KEY: ${{ inputs.wireguard-private-key }}
+        WG_ADDRESS: ${{ inputs.wireguard-address }}
+        WG_DNS: ${{ inputs.wireguard-dns }}
+        WG_PEER_PUBLIC_KEY: ${{ inputs.wireguard-peer-public-key }}
+        WG_PRESHARED_KEY: ${{ inputs.wireguard-preshared-key }}
+        WG_ENDPOINT: ${{ inputs.wireguard-endpoint }}
+        WG_ALLOWED_IPS: ${{ inputs.wireguard-allowed-ips }}
       run: |
         # Create WireGuard config directory
         sudo mkdir -p /etc/wireguard
 
-        # Create WireGuard configuration file
-        sudo tee /etc/wireguard/wg0.conf > /dev/null <<EOF
-        [Interface]
-        PrivateKey = ${{ inputs.wireguard-private-key }}
-        Address = ${{ inputs.wireguard-address }}
-        DNS = ${{ inputs.wireguard-dns }}
-
-        [Peer]
-        PublicKey = ${{ inputs.wireguard-peer-public-key }}
-        EOF
-
-        # Add PresharedKey if provided (optional security enhancement)
-        if [ -n "${{ inputs.wireguard-preshared-key }}" ]; then
-          echo "PresharedKey = ${{ inputs.wireguard-preshared-key }}" \
-            | sudo tee -a /etc/wireguard/wg0.conf > /dev/null
-        fi
-
-        # Add remaining peer configuration
-        sudo tee -a /etc/wireguard/wg0.conf > /dev/null <<EOF
-        Endpoint = ${{ inputs.wireguard-endpoint }}
-        AllowedIPs = ${{ inputs.wireguard-allowed-ips }}
-        PersistentKeepalive = 25
-        EOF
+        # Create WireGuard configuration file. Values are written with
+        # printf so they are data, never shell syntax.
+        {
+          printf '[Interface]\n'
+          printf 'PrivateKey = %s\n' "$WG_PRIVATE_KEY"
+          printf 'Address = %s\n' "$WG_ADDRESS"
+          printf 'DNS = %s\n' "$WG_DNS"
+          printf '\n[Peer]\n'
+          printf 'PublicKey = %s\n' "$WG_PEER_PUBLIC_KEY"
+          # Add PresharedKey if provided (optional security enhancement)
+          if [ -n "$WG_PRESHARED_KEY" ]; then
+            printf 'PresharedKey = %s\n' "$WG_PRESHARED_KEY"
+          fi
+          printf 'Endpoint = %s\n' "$WG_ENDPOINT"
+          printf 'AllowedIPs = %s\n' "$WG_ALLOWED_IPS"
+          printf 'PersistentKeepalive = 25\n'
+        } | sudo tee /etc/wireguard/wg0.conf > /dev/null
 
         # Set proper permissions
         sudo chmod 600 /etc/wireguard/wg0.conf
@@ -186,71 +247,95 @@ runs:
 
     - name: Setup SSH Configuration
       shell: bash
+      env:
+        SSH_HOSTNAME: ${{ inputs.ssh-hostname }}
+        SSH_HOST_IP: ${{ inputs.ssh-host-ip }}
+        SSH_USER: ${{ inputs.ssh-user }}
+        SSH_PORT: ${{ inputs.ssh-port }}
       run: |
         # Set up SSH config for the hostname
         mkdir -p ~/.ssh
         chmod 700 ~/.ssh
 
         # Add SSH config entry for the hostname
-        cat >> ~/.ssh/config <<EOF
-        Host ${{ inputs.ssh-hostname }}
-          HostName ${{ inputs.ssh-host-ip }}
-          User ${{ inputs.ssh-user }}
-          Port ${{ inputs.ssh-port }}
-          IdentityFile /tmp/id_rsa
-        EOF
+        {
+          printf 'Host %s\n' "$SSH_HOSTNAME"
+          printf '  HostName %s\n' "$SSH_HOST_IP"
+          printf '  User %s\n' "$SSH_USER"
+          printf '  Port %s\n' "$SSH_PORT"
+          printf '  IdentityFile /tmp/id_rsa\n'
+        } >> ~/.ssh/config
         chmod 600 ~/.ssh/config
 
     - name: Setup SSH key
       id: setup-ssh-key
       shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        SSH_HOSTNAME: ${{ inputs.ssh-hostname }}
+        SSH_HOST_IP: ${{ inputs.ssh-host-ip }}
+        SSH_HOST_KEY: ${{ inputs.ssh-host-key }}
       run: |
         # Create SSH directory
         mkdir -p ~/.ssh
         chmod 700 ~/.ssh
 
-        # Add SSH private key
-        echo "${{ inputs.ssh-private-key }}" > /tmp/id_rsa
+        # Add SSH private key (never readable by others, even briefly)
+        (umask 077; printf '%s\n' "$SSH_PRIVATE_KEY" > /tmp/id_rsa)
         chmod 600 /tmp/id_rsa
 
         # Add server host key to known_hosts for secure connection
         # Format: hostname,ip ssh-key-type ssh-key-data
-        HOST_ENTRY="${{ inputs.ssh-hostname }},${{ inputs.ssh-host-ip }}"
-        echo "$HOST_ENTRY ${{ inputs.ssh-host-key }}" >> ~/.ssh/known_hosts
+        # The Cleanup step removes exactly this line.
+        printf '%s,%s %s\n' "$SSH_HOSTNAME" "$SSH_HOST_IP" "$SSH_HOST_KEY" \
+          >> ~/.ssh/known_hosts
         echo "known-hosts-entry-added=true" >> "$GITHUB_OUTPUT"
         chmod 600 ~/.ssh/known_hosts
 
     - name: Test VPN connectivity
       shell: bash
       if: ${{ inputs.ping-check == 'true' }}
+      env:
+        SSH_HOST_IP: ${{ inputs.ssh-host-ip }}
       run: |
         # Test ping to server through VPN
-        ping -c 3 ${{ inputs.ssh-host-ip }}
+        ping -c 3 -- "$SSH_HOST_IP"
 
     - name: Execute SSH command
       shell: bash
       if: ${{ inputs.operation == 'ssh' }}
+      env:
+        SSH_HOSTNAME: ${{ inputs.ssh-hostname }}
+        REMOTE_COMMAND: ${{ inputs.command }}
       run: |
-        # Execute command on remote server via SSH through VPN
-        ssh ${{ inputs.ssh-hostname }} "${{ inputs.command }}"
+        # Execute command on remote server via SSH through VPN.
+        # The command is passed as a single argument and is not expanded
+        # locally; the remote shell interprets it.
+        ssh -- "$SSH_HOSTNAME" "$REMOTE_COMMAND"
 
     - name: SCP Upload (Local to Remote)
       shell: bash
       if: ${{ inputs.operation == 'scp' && inputs.scp-direction == 'upload' }}
+      env:
+        SSH_HOSTNAME: ${{ inputs.ssh-hostname }}
+        SCP_SOURCE: ${{ inputs.scp-source }}
+        SCP_DESTINATION: ${{ inputs.scp-destination }}
       run: |
         # Upload file from local to remote
         echo "Uploading file from local to remote..."
-        scp "${{ inputs.scp-source }}" \
-          ${{ inputs.ssh-hostname }}:"${{ inputs.scp-destination }}"
+        scp -- "$SCP_SOURCE" "$SSH_HOSTNAME:$SCP_DESTINATION"
 
     - name: SCP Download (Remote to Local)
       shell: bash
       if: ${{ inputs.operation == 'scp' && inputs.scp-direction == 'download' }}
+      env:
+        SSH_HOSTNAME: ${{ inputs.ssh-hostname }}
+        SCP_SOURCE: ${{ inputs.scp-source }}
+        SCP_DESTINATION: ${{ inputs.scp-destination }}
       run: |
         # Download file from remote to local
         echo "Downloading file from remote to local..."
-        scp ${{ inputs.ssh-hostname }}:"${{ inputs.scp-source }}" \
-          "${{ inputs.scp-destination }}"
+        scp -- "$SSH_HOSTNAME:$SCP_SOURCE" "$SCP_DESTINATION"
 
     - name: Cleanup
       shell: bash
