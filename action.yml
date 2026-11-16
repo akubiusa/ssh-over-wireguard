@@ -202,6 +202,7 @@ runs:
         chmod 600 ~/.ssh/config
 
     - name: Setup SSH key
+      id: setup-ssh-key
       shell: bash
       run: |
         # Create SSH directory
@@ -216,6 +217,7 @@ runs:
         # Format: hostname,ip ssh-key-type ssh-key-data
         HOST_ENTRY="${{ inputs.ssh-hostname }},${{ inputs.ssh-host-ip }}"
         echo "$HOST_ENTRY ${{ inputs.ssh-host-key }}" >> ~/.ssh/known_hosts
+        echo "known-hosts-entry-added=true" >> "$GITHUB_OUTPUT"
         chmod 600 ~/.ssh/known_hosts
 
     - name: Test VPN connectivity
@@ -253,12 +255,39 @@ runs:
     - name: Cleanup
       shell: bash
       if: always()
+      env:
+        SSH_HOSTNAME: ${{ inputs.ssh-hostname }}
+        SSH_HOST_IP: ${{ inputs.ssh-host-ip }}
+        SSH_HOST_KEY: ${{ inputs.ssh-host-key }}
+        SSH_KNOWN_HOST_ENTRY_ADDED: ${{ steps.setup-ssh-key.outputs.known-hosts-entry-added }}
       run: |
         # Stop WireGuard interface
         sudo wg-quick down wg0 || true
+        sudo rm -f /etc/wireguard/wg0.conf
 
         # Remove SSH key
         rm -f /tmp/id_rsa
 
         # Remove SSH config
         rm -f ~/.ssh/config
+
+        if [ "$SSH_KNOWN_HOST_ENTRY_ADDED" = "true" ] && [ -f ~/.ssh/known_hosts ]; then
+            SSH_KNOWN_HOST_ENTRY=$(printf '%s' "$SSH_HOSTNAME,$SSH_HOST_IP $SSH_HOST_KEY")
+            export SSH_KNOWN_HOST_ENTRY
+            known_hosts_tmp=$(mktemp)
+            trap 'rm -f "$known_hosts_tmp"' EXIT
+
+            # Preserve earlier identical entries by removing only the last match.
+            awk '
+                {
+                    entries[NR] = $0
+                    if ($0 == ENVIRON["SSH_KNOWN_HOST_ENTRY"]) last_match = NR
+                }
+                END {
+                    for (i = 1; i <= NR; i++) {
+                        if (i != last_match) print entries[i]
+                    }
+                }
+            ' ~/.ssh/known_hosts > "$known_hosts_tmp"
+            cat "$known_hosts_tmp" > ~/.ssh/known_hosts
+        fi
